@@ -1474,13 +1474,13 @@ function fitPlane(depth, W, H, isBg) {
 const planeZ = (m, x, y, W, H) => m.a * (2 * x / W - 1) + m.b * (2 * y / H - 1) + m.c;
 // forEachPixel(cb) must call cb(x, y, weight) where weight = how many original pixels the sample stands for.
 function volumeML(depth, W, H, plane, fpx, forEachPixel) {
-  let vol = 0, hsum = 0, n = 0;
+  let vol = 0, hsum = 0, n = 0, area = 0;
   forEachPixel((x, y, w) => {
     const z = depth[y * W + x]; if (!isFinite(z) || z <= 0) return;
     const h = Math.min(0.12, Math.max(0, planeZ(plane, x, y, W, H) - z));
-    vol += h * (z / fpx) ** 2 * w; hsum += h * w; n += w;
+    vol += h * (z / fpx) ** 2 * w; hsum += h * w; n += w; area += (z / fpx) ** 2 * w;
   });
-  return { ml: vol * 1e6, meanH: n ? hsum / n : 0 };
+  return { ml: vol * 1e6, meanH: n ? hsum / n : 0, area };
 }
 // </depth-math>
 
@@ -1636,12 +1636,14 @@ async function depthLiveLoop() {
         for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry; if (dx * dx + dy * dy > 1) corner.push(hOf(x, y)); }
         corner.sort((p, q) => p - q);
         const base = corner.length > 20 ? Math.min(0.06, Math.max(0, corner[Math.floor(corner.length * 0.25)])) : 0;
-        let vol = 0, hs = 0, n = 0;
+        let vol = 0, hs = 0, n = 0, area = 0, nAll = 0;
         for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
           if (owner[y * w + x] !== k) continue;
           const zz = z[y * w + x], hg = Math.min(0.12, hOf(x, y) - base);
+          area += (zz / fpx) ** 2; nAll++;
           if (hg > MIN_RAISED) { vol += hg * (zz / fpx) ** 2; hs += hg; n++; }
         }
+        vol = area * clampH(f.name, area ? vol / area : 0);   // footprint from geometry x plausible mean height
         const key = it.label + "#" + (rank[it.label] = (rank[it.label] || 0) + 1);
         const hist = (liveSmooth[key] = (liveSmooth[key] || []).concat(vol * 1e6).slice(-9));   // median of the last 9 readings: steady numbers
         const mlRaw = medianOf(hist), ml = mlRaw * volK(), g = capG(f, ml * densityFor(f.name) * (kMap()[f.name] || 1));
@@ -1773,6 +1775,11 @@ async function prepDepth() {
   let mn = Infinity, mx = -Infinity; for (let i = 0; i < d.length; i += 97) { if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
   dbg(`DEPTH ok: z range ${(mn * 100).toFixed(0)}-${(mx * 100).toFixed(0)} cm, table plane at centre ${(plane.c * 100).toFixed(1)} cm, tilt x ${(plane.a * 100).toFixed(1)} y ${(plane.b * 100).toFixed(1)} cm`);
 }
+// Depth Anything is RELATIVE (unknown scale AND shift), so absolute heights are unreliable and saturate. Footprint area comes from the
+// camera geometry; the mean height is only allowed to move within 0.5x-1.5x of a typical mean height for that food (metres).
+const HPRIOR = [[/dosa|roti|chapati|naan|paratha|uttapam|uttapa/i, 0.008], [/bhatura|puri|poori|kachori/i, 0.02], [/idli|vada|samosa|gulab|jalebi|ladoo|laddu/i, 0.028], [/chutney|raita|sauce|dip/i, 0.015], [/pizza/i, 0.012], [/./, 0.03]];
+const priorH = name => HPRIOR.find(([re]) => re.test(name))[1];
+const clampH = (name, mh) => { const p = priorH(name); return Math.min(1.5 * p, Math.max(0.5 * p, mh)); };
 const capG = (food, g) => { const u = food && food.units && food.units[0]; return u ? Math.min(g, u.g * 3) : g; }; // never report more than 3 typical portions
 const densityFor = name => DENSITY.find(([re]) => re.test(name))[1];
 const kMap = () => store.get("cc-depth-k", {});
@@ -1780,7 +1787,7 @@ function setGrams(seg) {
   if (!depthCache) return;
   const { d, plane, fpx } = depthCache, W = stillCanvas.width, H = stillCanvas.height, m = seg.mask;
   const v = volumeML(d, W, H, plane, fpx, cb => { for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) if (m[y * W + x]) cb(x, y, 4); });
-  seg.meanH = v.meanH; seg.ml = v.ml * volK(); seg.gramsRaw = seg.ml * densityFor(seg.food.name);
+  seg.meanH = clampH(seg.food.name, v.meanH); seg.ml = v.area * seg.meanH * 1e6 * volK(); seg.gramsRaw = seg.ml * densityFor(seg.food.name);
   dbg(`VOLUME ${seg.food.name}: mean height ${(v.meanH * 1000).toFixed(1)} mm, ${v.ml.toFixed(0)} mL, ${seg.gramsRaw.toFixed(0)} g raw`);
   seg.grams = capG(seg.food, seg.gramsRaw * (kMap()[seg.food.name] || 1));
   if (seg.comp) Object.values(seg.comp).forEach(g => {

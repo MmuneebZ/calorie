@@ -1216,16 +1216,40 @@ async function loadModels() {
   try { localStorage.setItem("cc-sam-ok", "1"); } catch (e) {}
 }
 // Run SAM 2 with one point per object. Returns {data, nObj, nM, H, W, iou}.
+let samSingle = false;   // set once we learn this SAM 2 build only accepts ONE prompt point per call (point_batch = 1)
 async function samRun(canvas, points) {
   if (!sam) throw new Error("SAM 2 is not loaded");
   const { T, model, processor } = sam;
   const image = await T.RawImage.fromCanvas(canvas);
-  const inputs = await processor(image, { input_points: [points.map(p => [p])], input_labels: [points.map(() => [1])] });
-  const out = await model(inputs);
-  const m = (await processor.post_process_masks(out.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes))[0];
-  const [nObj, nM, H, W] = m.dims;
-  if (W !== canvas.width || H !== canvas.height) throw new Error(`mask size ${W}x${H} does not match the photo`);
-  return { data: m.data, nObj, nM, H, W, iou: out.iou_scores ? out.iou_scores.data : null };
+  const mk = pts => processor(image, { input_points: [pts.map(p => [p])], input_labels: [pts.map(() => [1])] });
+  const post = async (out, inputs) => (await processor.post_process_masks(out.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes))[0];
+  const check = m => { const [, , H, W] = m.dims; if (W !== canvas.width || H !== canvas.height) throw new Error(`mask size ${W}x${H} does not match the photo`); };
+  if (!samSingle || points.length < 2) {
+    try {
+      const inputs = await mk(points), out = await model(inputs), m = await post(out, inputs);
+      check(m); const [nObj, nM, H, W] = m.dims;
+      return { data: m.data, nObj, nM, H, W, iou: out.iou_scores ? out.iou_scores.data : null };
+    } catch (e) {
+      if (points.length < 2 || !/invalid dimensions for input|input_points/i.test(String(e && e.message))) throw e;
+      samSingle = true; dbg("SAM 2: this build takes one prompt point per call, switching to one-by-one mode");
+    }
+  }
+  // One point per call. The image encoder runs once; its embeddings are reused for every point when the model allows it.
+  let emb = null;
+  try { if (typeof model.get_image_embeddings === "function") emb = await model.get_image_embeddings(await mk([points[0]])); } catch (e) { emb = null; dbg("SAM 2: cannot reuse image embeddings (" + (e && e.message) + "), re-encoding per point (slow)"); }
+  const masks = [], ious = []; let dims = null;
+  for (const pt of points) {
+    const inputs = await mk([pt]);
+    let out;
+    if (emb) { try { out = await model({ ...inputs, ...emb }); } catch (e) { emb = null; dbg("SAM 2: embedding reuse failed (" + (e && e.message) + "), re-encoding per point (slow)"); } }
+    if (!out) out = await model(inputs);
+    const m = await post(out, inputs); check(m); dims = m.dims;
+    masks.push(m.data); if (out.iou_scores) ious.push(out.iou_scores.data);
+  }
+  const [o1, nM, H, W] = dims, per = o1 * nM * H * W, data = new masks[0].constructor(per * masks.length);
+  masks.forEach((d, i) => data.set(d, i * per));
+  let iou = null; if (ious.length === masks.length) { iou = new Float32Array(masks.length * o1 * nM); ious.forEach((d, i) => iou.set(d, i * o1 * nM)); }
+  return { data, nObj: masks.length * o1, nM, H, W, iou };
 }
 function bestMask(r, o) {
   let best = 0;

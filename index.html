@@ -192,6 +192,7 @@
       <div class="two">
         <label class="btn" style="text-align:center">Analyse a photo<input type="file" id="photoIn" accept="image/*" hidden></label>
         <button class="btn" id="backLive" hidden>Back to live camera</button>
+        <button class="btn" id="depthBtn">Show depth view</button>
         <button class="btn" id="capBtn">Capture &amp; identify</button>
         <button class="btn primary" id="segBtn" hidden>Try segmentation again</button>
         <button class="btn" id="speedTest">Speed test</button>
@@ -996,7 +997,7 @@ window.addEventListener("error", e => dbg("JS error: " + e.message));
 window.addEventListener("unhandledrejection", e => dbg("Promise error: " + ((e.reason && e.reason.message) || e.reason)));
 
 function resetSeg() {
-  stillCanvas = null; stillItems = []; segs = []; own = null; depthCache = null;
+  stillCanvas = null; stillItems = []; segs = []; own = null; depthCache = null; depthView = false; $("depthBtn").textContent = "Show depth view";
   $("segBtn").hidden = true; $("segHelp").hidden = true;
 }
 async function loadModels() {
@@ -1216,7 +1217,7 @@ function renderSegList() {
       .map(c => `${esc(c.top.id)} ×${c.n} (${Math.round(c.share * 100)}% of the pizza${c.grams ? `, ~${r0(c.grams)} g, ${r0(c.kcal)} kcal` : ""})`).join("<br>") : "";
     const alts = s.alts.map(a => `<button class="btn small" style="margin:4px 4px 0 0" data-swap="${i}" data-name="${esc(a.food.name)}">${esc(a.food.name)}</button>`).join("");
     return `<div class="chip" style="align-items:flex-start"><span><b>${esc(f.name)}</b> · ${Math.round(s.conf * 100)}% sure${s.multi && !s.byToppings ? ` · exact type ${Math.round(s.varConf * 100)}%` : ""}${s.byToppings ? " · decided by toppings" : ""}<br>
-      <span class="help" style="margin:0">${Math.round(s.share * 100)}% of the food area · ${amount}</span>
+      <span class="help" style="margin:0">${Math.round(s.share * 100)}% of the food area · ${amount}</span><br><span class="help" style="margin:2px 0 0">${s.ml != null ? `depth: avg height ${(s.meanH * 1000).toFixed(0)} mm · ${r0(s.ml)} mL` : "depth: OFF for this item (showing a default portion)"}</span>
       ${tops ? `<br><span class="help" style="margin:4px 0 0">${tops}</span>` : ""}<br>
       <span class="help" style="margin:4px 0 0">Not right?</span> ${alts}</span>
       <span style="display:flex;flex-direction:column;gap:6px">
@@ -1383,8 +1384,33 @@ window.getDepthMap = async canvas => {
   return { data: resizeF32(z, w, h, canvas.width, canvas.height), width: canvas.width, height: canvas.height };
 };
 
+// Heat map of food height above the fitted table plane (blue = table level, red = 4 cm or more). Tap the button again to go back.
+let depthView = false;
+function drawDepthView() {
+  if (!stillCanvas || !depthCache) return false;
+  const { d, plane } = depthCache, W = stillCanvas.width, H = stillCanvas.height;
+  const tmp = document.createElement("canvas"); tmp.width = W; tmp.height = H;
+  const tctx = tmp.getContext("2d"), img = tctx.createImageData(W, H), o = img.data;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, h = Math.max(0, Math.min(0.04, planeZ(plane, x, y, W, H) - d[i])) / 0.04;
+    o[i * 4] = Math.round(255 * h); o[i * 4 + 1] = Math.round(255 * (1 - Math.abs(h - 0.5) * 2)); o[i * 4 + 2] = Math.round(255 * (1 - h)); o[i * 4 + 3] = 215;
+  }
+  tctx.putImageData(img, 0, 0);
+  const cv = $("overlay"), vp = $("viewport"), dpr = window.devicePixelRatio || 1, VW = vp.clientWidth * dpr, VH = vp.clientHeight * dpr;
+  if (cv.width !== VW || cv.height !== VH) { cv.width = VW; cv.height = VH; }
+  const ctx = cv.getContext("2d"); ctx.clearRect(0, 0, VW, VH);
+  const sc = Math.min(VW / W, VH / H); ctx.drawImage(tmp, (VW - W * sc) / 2, (VH - H * sc) / 2, W * sc, H * sc);
+  return true;
+}
+$("depthBtn").onclick = () => {
+  if (!stillCanvas) return toast("Capture or analyse a photo first");
+  if (!depthCache) return toast("No depth for this photo. Open the Debug log below to see why.");
+  depthView = !depthView;
+  if (depthView) { drawDepthView(); $("depthBtn").textContent = "Hide depth view"; setStatus("Depth view: blue = table level, red = 4 cm or more above the table. Food should look warm, the table and plate rim blue."); }
+  else { drawSegments(); $("depthBtn").textContent = "Show depth view"; }
+};
 async function getDepth(canvas) {
-  if (typeof window.getDepthMap !== "function") return null;
+  if (typeof window.getDepthMap !== "function") { dbg("DEPTH: window.getDepthMap is not defined"); return null; }
   try {
     const r = await window.getDepthMap(canvas);
     const W = canvas.width, H = canvas.height;
@@ -1393,14 +1419,17 @@ async function getDepth(canvas) {
     const out = new Float32Array(W * H);
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) out[y * W + x] = r.data[Math.min(r.height - 1, Math.floor(y * r.height / H)) * r.width + Math.min(r.width - 1, Math.floor(x * r.width / W))];
     return out;
-  } catch (e) { console.warn("depth failed", e); return null; }
+  } catch (e) { console.warn("depth failed", e); dbg("DEPTH FAILED: " + (e && e.message ? e.message : e)); return null; }
 }
 async function prepDepth() {
   depthCache = null;
   const d = await getDepth(stillCanvas); if (!d) return;
   const W = stillCanvas.width, H = stillCanvas.height;
-  const plane = fitPlane(d, W, H, i => own[i] < 0); if (!plane) return;
+  const plane = fitPlane(d, W, H, i => own[i] < 0);
+  if (!plane) { dbg("DEPTH: could not fit a table plane (too little bare table around the food)"); return; }
   depthCache = { d, plane, fpx: (W / 2) / Math.tan(CAM_HFOV * Math.PI / 360) };
+  let mn = Infinity, mx = -Infinity; for (let i = 0; i < d.length; i += 97) { if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
+  dbg(`DEPTH ok: z range ${(mn * 100).toFixed(0)}-${(mx * 100).toFixed(0)} cm, table plane at centre ${(plane.c * 100).toFixed(1)} cm, tilt x ${(plane.a * 100).toFixed(1)} y ${(plane.b * 100).toFixed(1)} cm`);
 }
 const densityFor = name => DENSITY.find(([re]) => re.test(name))[1];
 const kMap = () => store.get("cc-depth-k", {});
@@ -1408,7 +1437,8 @@ function setGrams(seg) {
   if (!depthCache) return;
   const { d, plane, fpx } = depthCache, W = stillCanvas.width, H = stillCanvas.height, m = seg.mask;
   const v = volumeML(d, W, H, plane, fpx, cb => { for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) if (m[y * W + x]) cb(x, y, 4); });
-  seg.meanH = v.meanH; seg.gramsRaw = v.ml * densityFor(seg.food.name);
+  seg.meanH = v.meanH; seg.ml = v.ml; seg.gramsRaw = v.ml * densityFor(seg.food.name);
+  dbg(`VOLUME ${seg.food.name}: mean height ${(v.meanH * 1000).toFixed(1)} mm, ${v.ml.toFixed(0)} mL, ${seg.gramsRaw.toFixed(0)} g raw`);
   seg.grams = seg.gramsRaw * (kMap()[seg.food.name] || 1);
   if (seg.comp) Object.values(seg.comp).forEach(g => {
     const sc = seg.partScale, bx = seg.box[0], by = seg.box[1];

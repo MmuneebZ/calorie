@@ -1531,6 +1531,25 @@ function boxMasks() {
     return { mask, area: w * h, box: [x, y, w, h], rect: true };
   }).filter(m => m.area > 0);
 }
+// Used when SAM 2 / CLIP are cancelled or fail: take the boxes from your .tflite detector, name each box with its own label,
+// and still measure volume with Depth Anything. Boxes are rectangles, so they include a little plate or table: treat as approximate.
+async function detectorDepthFallback() {
+  if (!stillCanvas || !stillItems.length) { dbg("fallback: the detector found no boxes, nothing to measure"); return false; }
+  const boxes = boxMasks(), found = [];
+  stillItems.forEach((it, i) => {
+    const f = labelFood(it.label), m = boxes[i]; if (!f || !m) return;
+    found.push(Object.assign(m, { food: f, conf: it.score || 0, alts: [], share: 0, varConf: 1, multi: false }));
+  });
+  if (!found.length) { dbg("fallback: no detector label matched a food in the database"); return false; }
+  segs = found; finishSegs();
+  setStatus("Models unavailable, measuring volume from the detector boxes with Depth Anything…");
+  await prepDepth();
+  if (!depthCache) { renderSegList(); drawSegments(); return false; }
+  for (const sg of segs) await enrich(sg);
+  renderSegList(); drawSegments();
+  setStatus(`Detector boxes + depth: ${segs.length} item${segs.length === 1 ? "" : "s"} (depth on). Box volumes include a little plate, so they are approximate; tap Weigh to calibrate.`);
+  return true;
+}
 async function segmentStill() {
   if (segBusy || !stillCanvas) return;
   segBusy = true; $("segBtn").hidden = true;
@@ -1558,6 +1577,7 @@ async function segmentStill() {
     dbg("segmentation stopped: " + (e && e.message));
     drawOverlay(stillItems, W, H); renderDetList.key = null; renderDetList(stillItems);
     $("segBtn").hidden = false;
+    try { if (await detectorDepthFallback()) { segBusy = false; return; } } catch (e2) { dbg("fallback failed: " + (e2 && e2.message)); }
     setStatus(e.message === "cancelled" ? "Cancelled. The boxes shown come from the old detector only." : `Identification failed: ${e.message}. The boxes shown come from the old detector only and can be wrong.`, true);
   } finally { segBusy = false; }
 }

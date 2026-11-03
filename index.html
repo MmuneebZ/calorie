@@ -187,6 +187,7 @@
       <div class="stats" id="stats"></div>
     </div>
     <div class="status" id="status">The scanner loads when you open this tab.</div>
+    <details class="pad" style="padding-top:0"><summary class="help">Debug log (send me this if something looks wrong)</summary><pre id="dbg" style="font-size:11px;white-space:pre-wrap;user-select:all;margin:6px 0 0"></pre></details>
     <div class="pad">
       <div class="two">
         <label class="btn" style="text-align:center">Analyse a photo<input type="file" id="photoIn" accept="image/*" hidden></label>
@@ -983,33 +984,42 @@ const GRID = 6, MAX_ITEMS = 10, MIN_AREA = 0.015, MAX_AREA = 0.7, MIN_IOU = 0.75
 const BG_PROMPTS = ["an empty plate", "an empty bowl", "a table surface", "a human hand", "a serving tray", "a spoon or fork", "a napkin", "a kitchen counter", "a tablecloth"];
 const GENERIC = ["curry dish", "snack item", "sweet item", "rice dish", "south indian breakfast", "dry vegetable", "fish dish", "fruits", "bread or roti naan"];
 const PALETTE = [[230,25,75],[60,180,75],[67,99,216],[245,130,49],[145,30,180],[0,166,166],[188,189,34],[240,50,230]];
-let sam = null, clip = null, stillCanvas = null, stillItems = [], segs = [], own = null, segBusy = false;
+let sam = null, clip = null, TJS = null, samErr = null, stillCanvas = null, stillItems = [], segs = [], own = null, segBusy = false;
+const dbgLines = [], dbg0 = performance.now();
+function dbg(m) {
+  dbgLines.push(`[${((performance.now() - dbg0) / 1000).toFixed(1)}s] ${m}`); if (dbgLines.length > 120) dbgLines.shift();
+  const el = $("dbg"); if (el) el.textContent = dbgLines.join("\n"); console.log("[cc]", m);
+}
+window.addEventListener("error", e => dbg("JS error: " + e.message));
+window.addEventListener("unhandledrejection", e => dbg("Promise error: " + ((e.reason && e.reason.message) || e.reason)));
 
 function resetSeg() {
   stillCanvas = null; stillItems = []; segs = []; own = null; depthCache = null;
   $("segBtn").hidden = true; $("segHelp").hidden = true;
 }
 async function loadModels() {
-  if (sam && clip) return;
+  if (clip && (sam || samErr)) return;
   let ok = false; try { ok = !!localStorage.getItem("cc-sam-ok"); } catch (e) {}
   if (!ok && !confirm("Automatic segmentation downloads two models once (SAM 2 and CLIP, roughly 200 to 300 MB in total, then cached). Use Wi-Fi. Continue?")) throw new Error("cancelled");
   setStatus("Downloading models (one time)…");
-  const T = await import(TJS_URL);
-  const device = navigator.gpu ? "webgpu" : "wasm";
+  if (!TJS) { TJS = await import(TJS_URL); dbg("Transformers.js loaded. Sam2Model: " + !!TJS.Sam2Model + ", CLIP classes: " + !!TJS.CLIPVisionModelWithProjection); }
+  const T = TJS, samDevice = navigator.gpu ? "webgpu" : "wasm";
   const prog = name => p => { if (p && p.status === "progress") setStatus(`Downloading ${name}… ${Math.round(p.progress)}%`); };
-  const load = async (Cls, id, name, dtype) => {
-    try { return await Cls.from_pretrained(id, { device, dtype, progress_callback: prog(name) }); }
-    catch (e) { return await Cls.from_pretrained(id, { device, progress_callback: prog(name) }); } // that precision may not exist for this repo
+  // try (device, precision) -> (device, default) -> (wasm, default)
+  const load = async (Cls, id, name, device, dtype) => {
+    if (!Cls) throw new Error(`${name}: this Transformers.js version has no such class`);
+    const tries = [{ device, dtype }, { device }, { device: "wasm" }];
+    let last;
+    for (const t of tries) {
+      try { const m = await Cls.from_pretrained(id, Object.assign({ progress_callback: prog(name) }, t)); dbg(`${name} loaded (${t.device}${t.dtype ? ", " + t.dtype : ""})`); return m; }
+      catch (e) { last = e; dbg(`${name} failed with ${t.device}${t.dtype ? "/" + t.dtype : ""}: ${e && e.message}`); }
+    }
+    throw last;
   };
-  if (!sam) {
-    const model = await load(T.Sam2Model, SAM_ID, "SAM 2", device === "webgpu" ? "fp16" : "q8");
-    const processor = await T.AutoProcessor.from_pretrained(SAM_ID);
-    sam = { T, model, processor, device };
-  }
-  if (!clip) {
+  if (!clip) { // CLIP first: naming food must work even if SAM 2 cannot run on this device
     const tok = await T.AutoTokenizer.from_pretrained(CLIP_ID);
-    const textModel = await load(T.CLIPTextModelWithProjection, CLIP_ID, "text model", "q8");
-    const visionModel = await load(T.CLIPVisionModelWithProjection, CLIP_ID, "vision model", "q8");
+    const textModel = await load(T.CLIPTextModelWithProjection, CLIP_ID, "CLIP text model", "wasm", "q8");
+    const visionModel = await load(T.CLIPVisionModelWithProjection, CLIP_ID, "CLIP vision model", "wasm", "q8");
     const processor = await T.AutoProcessor.from_pretrained(CLIP_ID);
     const embedTexts = async texts => {
       const { text_embeds } = await textModel(tok(texts, { padding: true, truncation: true }));
@@ -1023,11 +1033,20 @@ async function loadModels() {
     const te = await embedTexts(TOP_LIST.map(t => `a close-up photo of ${t.prompt}`).concat(PART_BG.map(t => `a close-up photo of ${t}`)));
     clip = { visionModel, processor, emb: fe.emb, dim: fe.dim, foods, nFood: foods.length, nAll: texts.length,
              tp: { emb: te.emb, dim: te.dim, n: TOP_LIST.length, nAll: TOP_LIST.length + PART_BG.length } };
+    dbg(`CLIP ready with ${foods.length} foods`);
+  }
+  if (!sam && !samErr) {
+    try {
+      const model = await load(T.Sam2Model, SAM_ID, "SAM 2", samDevice, samDevice === "webgpu" ? "fp16" : "q8");
+      const processor = await T.AutoProcessor.from_pretrained(SAM_ID);
+      sam = { T, model, processor, device: samDevice };
+    } catch (e) { samErr = e; dbg("SAM 2 could not load: " + (e && e.message)); }
   }
   try { localStorage.setItem("cc-sam-ok", "1"); } catch (e) {}
 }
 // Run SAM 2 with one point per object. Returns {data, nObj, nM, H, W, iou}.
 async function samRun(canvas, points) {
+  if (!sam) throw new Error("SAM 2 is not loaded");
   const { T, model, processor } = sam;
   const image = await T.RawImage.fromCanvas(canvas);
   const inputs = await processor(image, { input_points: [points.map(p => [p])], input_labels: [points.map(() => [1])] });
@@ -1092,7 +1111,7 @@ function cutoutOf(src, mask, box, opt = {}) {
 }
 const cutout = seg => cutoutOf(stillCanvas, seg.mask, seg.box);
 async function imageEmbed(crop) {
-  const { image_embeds } = await clip.visionModel(await clip.processor(await sam.T.RawImage.fromCanvas(crop)));
+  const { image_embeds } = await clip.visionModel(await clip.processor(await TJS.RawImage.fromCanvas(crop)));
   const e = Float32Array.from(image_embeds.data); let n = 0; for (let k = 0; k < e.length; k++) n += e[k] ** 2; n = Math.sqrt(n) || 1;
   for (let k = 0; k < e.length; k++) e[k] /= n;
   return e;
@@ -1104,26 +1123,38 @@ function scoreSet(e, emb, dim, nAll) {
   const pr = Array.from(logit, v => { const x = Math.exp(v - mx); sum += x; return x; });
   return pr.map(x => x / sum);
 }
+// Choose the dish. Variants of one dish (Pizza (chicken), Pizza (veg) ...) share their probability, otherwise a
+// single wrong-but-confident row from the box detector can beat a pizza whose votes are split six ways.
+function pickFood(prFoods, foods, vote) {
+  const sc = foods.map((food, i) => ({ food, p: prFoods[i] }));
+  if (vote) { const t = sc.find(x => x.food.name === vote.name); if (t) t.p += vote.w; }
+  const tot = sc.reduce((a, b) => a + b.p, 0) || 1; sc.forEach(x => (x.p /= tot));
+  const fam = {};
+  sc.forEach(x => { const k = x.food.name.split(" (")[0].toLowerCase(); (fam[k] = fam[k] || { p: 0, items: [] }).p += x.p; fam[k].items.push(x); });
+  const fams = Object.values(fam).sort((a, b) => b.p - a.p), best = fams[0];
+  best.items.sort((a, b) => b.p - a.p);
+  const alts = best.items.slice(1, 3).concat(fams.slice(1, 3).map(f => f.items.slice().sort((a, b) => b.p - a.p)[0])).slice(0, 4);
+  return { food: best.items[0].food, conf: best.p, varConf: best.items[0].p / (best.p || 1), multi: best.items.length > 1, alts, top: sc.slice().sort((a, b) => b.p - a.p).slice(0, 5) };
+}
 async function identify(seg, det) {
   const crop = cutout(seg), e = await imageEmbed(crop);
   const { emb, dim, foods, nFood, nAll } = clip;
   const pr = scoreSet(e, emb, dim, nAll);
   const bgP = pr.slice(nFood).reduce((a, b) => a + b, 0);
-  const sc = pr.slice(0, nFood).map((p, i) => ({ food: foods[i], p }));
-  // small vote from your own Indian-food detector, ignoring its generic classes
+  let vote = null;   // small hint from your own Indian-food detector, ignoring its generic classes
   if (det) {
     const r = toItems(det.detect(crop).detections).filter(d => !GENERIC.includes(d.label)).sort((a, b) => b.score - a.score)[0];
     const f = r && labelFood(r.label);
-    if (f) { const t = sc.find(x => x.food.name === f.name); if (t) t.p += 0.3 * r.score; }
+    if (f) vote = { name: f.name, w: 0.08 * r.score };
   }
-  const tot = sc.reduce((a, b) => a + b.p, 0) || 1; sc.forEach(x => (x.p /= tot));
-  sc.sort((a, b) => b.p - a.p);
-  seg.bg = bgP > 0.5; seg.food = sc[0].food; seg.conf = sc[0].p; seg.alts = sc.slice(1, 4);
+  const k = pickFood(pr.slice(0, nFood), foods, vote);
+  seg.bg = bgP > 0.5; seg.food = k.food; seg.conf = k.conf; seg.varConf = k.varConf; seg.multi = k.multi; seg.alts = k.alts;
+  seg.dbg = `background ${Math.round(bgP * 100)}% | ` + k.top.map(x => `${x.food.name} ${Math.round(x.p * 100)}%`).join(", ") + (vote ? ` | detector hint: ${vote.name}` : "");
 }
 async function identifyAll(list) {
   let det = null;
-  try { det = await createDetector(findModel(S.model), live ? live.used : "CPU", "IMAGE"); } catch (e) {}
-  try { for (let i = 0; i < list.length; i++) { setStatus(`Identifying item ${i + 1} of ${list.length}…`); await identify(list[i], det); } }
+  try { det = await createDetector(findModel(S.model), live ? live.used : "CPU", "IMAGE"); } catch (e) { dbg("detector unavailable for crops: " + e.message); }
+  try { for (let i = 0; i < list.length; i++) { setStatus(`Identifying item ${i + 1} of ${list.length}…`); await identify(list[i], det); dbg(`item ${i + 1}: ${list[i].dbg}`); } }
   finally { if (det) det.close(); }
 }
 // Resolve overlaps (smallest mask wins each pixel), drop fully-covered masks, compute shares.
@@ -1182,7 +1213,7 @@ function renderSegList() {
     const tops = s.comp ? Object.values(s.comp).filter(c => PIECE_KINDS.includes(c.top.kind)).sort((a, b) => b.area - a.area)
       .map(c => `${esc(c.top.id)} ×${c.n} (${Math.round(c.share * 100)}% of the pizza${c.grams ? `, ~${r0(c.grams)} g, ${r0(c.kcal)} kcal` : ""})`).join("<br>") : "";
     const alts = s.alts.map(a => `<button class="btn small" style="margin:4px 4px 0 0" data-swap="${i}" data-name="${esc(a.food.name)}">${esc(a.food.name)}</button>`).join("");
-    return `<div class="chip" style="align-items:flex-start"><span><b>${esc(f.name)}</b> · ${Math.round(s.conf * 100)}% sure${s.byToppings ? " · decided by toppings" : ""}<br>
+    return `<div class="chip" style="align-items:flex-start"><span><b>${esc(f.name)}</b> · ${Math.round(s.conf * 100)}% sure${s.multi && !s.byToppings ? ` · exact type ${Math.round(s.varConf * 100)}%` : ""}${s.byToppings ? " · decided by toppings" : ""}<br>
       <span class="help" style="margin:0">${Math.round(s.share * 100)}% of the food area · ${amount}</span>
       ${tops ? `<br><span class="help" style="margin:4px 0 0">${tops}</span>` : ""}<br>
       <span class="help" style="margin:4px 0 0">Not right?</span> ${alts}</span>
@@ -1386,28 +1417,48 @@ function refineByToppings(seg) {
 async function enrich(seg) {
   try {
     setGrams(seg);
-    if (PARTS_FOR.test(seg.food.name)) { await analyseParts(seg); refineByToppings(seg); setGrams(seg); }
+    if (sam && !seg.rect && PARTS_FOR.test(seg.food.name)) { await analyseParts(seg); refineByToppings(seg); setGrams(seg); }
   } catch (e) { console.warn("enrich failed", e); seg.partsErr = e.message; }
+}
+// Fallback when SAM 2 cannot run: identify each detector box (or the whole photo) with CLIP.
+function boxMasks() {
+  const W = stillCanvas.width, H = stillCanvas.height;
+  const boxes = stillItems.length ? stillItems.map(i => [i.x, i.y, i.w, i.h]) : [[0, 0, W, H]];
+  return boxes.map(([x, y, w, h]) => {
+    x = Math.max(0, Math.round(x)); y = Math.max(0, Math.round(y)); w = Math.min(W - x, Math.round(w)); h = Math.min(H - y, Math.round(h));
+    const mask = new Uint8Array(W * H);
+    for (let yy = y; yy < y + h; yy++) mask.fill(1, yy * W + x, yy * W + x + w);
+    return { mask, area: w * h, box: [x, y, w, h], rect: true };
+  }).filter(m => m.area > 0);
 }
 async function segmentStill() {
   if (segBusy || !stillCanvas) return;
   segBusy = true; $("segBtn").hidden = true;
+  const t0 = performance.now(), W = stillCanvas.width, H = stillCanvas.height;
+  $("detList").innerHTML = `<p class="empty">Analysing the photo…</p>`;
+  const cv = $("overlay"); cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
   try {
-    const t0 = performance.now();
     await loadModels();
-    setStatus("Finding every item… the first run is the slowest.");
-    const found = await samAuto(stillCanvas);
-    if (!found.length) { segs = []; own = null; setStatus("No separate items found. Tap the food in the photo, or use Add food.", true); $("segHelp").hidden = false; own = new Int16Array(stillCanvas.width * stillCanvas.height).fill(-1); renderSegList(); return; }
+    let found = [], mode = "SAM 2";
+    if (sam) {
+      setStatus("Finding every item… the first run is the slowest.");
+      try { found = await samAuto(stillCanvas); dbg(`SAM 2 found ${found.length} candidate items`); }
+      catch (e) { samErr = e; dbg("SAM 2 run failed: " + (e && e.message)); }
+    }
+    if (!found.length) { found = boxMasks(); mode = "boxes only"; dbg(`using ${found.length} rectangular region(s): SAM 2 ${samErr ? "failed" : "found nothing"}`); }
     await identifyAll(found);
     segs = found.filter(s => !s.bg);
     finishSegs();                       // dishes are shown straight away
     await prepDepth();
     for (let i = 0; i < segs.length; i++) { setStatus(`Analysing ${segs[i].food.name} (${i + 1}/${segs.length})…`); await enrich(segs[i]); }
     renderSegList(); drawSegments();
-    setStatus(`Found ${segs.length} food item${segs.length === 1 ? "" : "s"} in ${((performance.now() - t0) / 1000).toFixed(1)} s (SAM 2 on ${sam.device}, depth ${depthCache ? "on" : "off"}).`);
+    const why = samErr ? ` SAM 2 problem: ${String(samErr.message || samErr).slice(0, 140)}` : "";
+    setStatus(`Found ${segs.length} food item${segs.length === 1 ? "" : "s"} in ${((performance.now() - t0) / 1000).toFixed(1)} s (${mode}, depth ${depthCache ? "on" : "off"}).${why}`, !!samErr);
   } catch (e) {
+    dbg("segmentation stopped: " + (e && e.message));
+    drawOverlay(stillItems, W, H); renderDetList.key = null; renderDetList(stillItems);
     $("segBtn").hidden = false;
-    setStatus(e.message === "cancelled" ? "Segmentation cancelled. The boxes above still work." : `Segmentation failed: ${e.message}. The boxes above still work.`, true);
+    setStatus(e.message === "cancelled" ? "Cancelled. The boxes shown come from the old detector only." : `Identification failed: ${e.message}. The boxes shown come from the old detector only and can be wrong.`, true);
   } finally { segBusy = false; }
 }
 $("segBtn").onclick = segmentStill;

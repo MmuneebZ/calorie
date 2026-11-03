@@ -193,6 +193,7 @@
         <label class="btn" style="text-align:center">Analyse a photo<input type="file" id="photoIn" accept="image/*" hidden></label>
         <button class="btn" id="backLive" hidden>Back to live camera</button>
         <button class="btn" id="depthBtn">Show depth view</button>
+        <button class="btn" id="liveDepthBtn">Live depth: on</button>
         <button class="btn" id="capBtn">Capture &amp; identify</button>
         <button class="btn primary" id="segBtn" hidden>Try segmentation again</button>
         <button class="btn" id="speedTest">Speed test</button>
@@ -209,8 +210,9 @@
       <div class="field"><span>Processor</span>
         <div class="seg" id="delSeg"><button data-del="GPU">GPU</button><button data-del="CPU">CPU</button></div>
       </div>
-      <div class="field"><span>Camera height above the table (cm)</span><input id="camH" type="number" inputmode="decimal" min="15" max="150"></div>
-      <p class="help">Depth Anything gives relative depth, so this number sets the real-world scale. Hold the phone straight above the plate at about this height, with some bare table visible around the plate. After the first estimate, tap "Weigh" once per food to fine-tune the volume-to-grams scale.</p>
+      <details class="pad" style="padding:6px 0"><summary class="help">Advanced: depth scale</summary>
+        <div class="field"><span>Assumed camera height above the table (cm)</span><input id="camH" type="number" inputmode="decimal" min="15" max="150"></div>
+        <p class="help">Only used to set the real-world scale of the depth map. Leave it at 40 and fix any remaining error with "Weigh" once per food.</p></details>
     </div>
   </section>
 
@@ -846,6 +848,7 @@ async function startCamera() {
     $("placeholder").hidden = true; $("still").hidden = true; $("backLive").hidden = true; $("speedTest").hidden = false; $("capBtn").hidden = false; resetSeg();
     if (!live) await ensureLive();
     requestAnimationFrame(scanLoop);
+    if (liveOn) depthLiveLoop();
   } catch (e) {
     setStatus(`Camera blocked (${e.message}). If you opened the link inside WhatsApp, open it in Safari or Chrome and allow camera access.`, true);
   }
@@ -879,24 +882,27 @@ function drawOverlay(items, srcW, srcH) {
     const x = ox + it.x * s, y = oy + it.y * s;
     ctx.strokeStyle = "#2f8f46"; ctx.strokeRect(x, y, it.w * s, it.h * s);
     const food = labelFood(it.label);
-    const text = `${food ? food.name : it.label} ${Math.round(it.score * 100)}%`;
+    const text = `${food ? food.name : it.label} ${Math.round(it.score * 100)}%` + (food && it.grams ? ` · ${r0(it.grams)} g · ${r0(nutrientsFor(food, it.grams).kcal)} kcal` : "");
     const pad = 4 * dpr, th = fpx + pad * 2, tw = ctx.measureText(text).width + pad * 2, ty = y - th >= 0 ? y - th : y;
     ctx.fillStyle = "#2f8f46"; ctx.fillRect(x, ty, tw, th);
     ctx.fillStyle = "#fff"; ctx.fillText(text, x + pad, ty + th - pad - 2 * dpr);
   });
 }
 function renderDetList(items) {
-  const key = items.map(i => i.label).sort().join("|");
+  const key = items.map(i => i.label + (i.grams ? Math.round(i.grams / 10) : "")).sort().join("|");
   if (key === renderDetList.key) return;
   renderDetList.key = key;
   if (!items.length) { $("detList").innerHTML = `<p class="empty">Nothing recognised yet.</p>`; return; }
   const counts = {};
-  items.forEach(i => (counts[i.label] = (counts[i.label] || 0) + 1));
+  const gsum = {};
+  items.forEach(i => { counts[i.label] = (counts[i.label] || 0) + 1; if (i.grams) gsum[i.label] = (gsum[i.label] || 0) + i.grams; });
   $("detList").innerHTML = Object.entries(counts).map(([label, n]) => {
     const f = labelFood(label);
     if (!f) return `<div class="chip"><span><b>${esc(label)}</b>${n > 1 ? ` × ${n}` : ""}<br><span class="help" style="margin:0">Not in the food list yet</span></span>
       <button class="btn small" data-search="${esc(label)}">Search</button></div>`;
-    const u = f.units[0];
+    const u = f.units[0], g = gsum[label];
+    if (g) return `<div class="chip"><span><b>${esc(f.name)}</b>${n > 1 ? ` × ${n}` : ""}<br><span class="help" style="margin:0">${r0(g)} g ≈ ${r0(nutrientsFor(f, g).kcal)} kcal (measured with depth)</span></span>
+      <button class="btn small" data-addg="${esc(f.name)}" data-g="${r0(g)}">Add</button></div>`;
     return `<div class="chip"><span><b>${esc(f.name)}</b>${n > 1 ? ` × ${n}` : ""}<br><span class="help" style="margin:0">${esc(u.label)} ≈ ${r0(nutrientsFor(f, u.g).kcal)} kcal</span></span>
       <button class="btn small" data-add="${esc(f.name)}" data-n="${n}">Add</button></div>`;
   }).join("");
@@ -919,12 +925,12 @@ function scanLoop() {
       const out = live.det.detectForVideo(v, t0);
       const t1 = performance.now();
       const items = toItems(out.detections);
-      lastDets = items;
+      lastDets = items; attachMeasures(items);
       if (lastTs) { const inst = 1000 / (t1 - lastTs); fps = fps ? 0.85 * fps + 0.15 * inst : inst; }
       lastTs = t1;
       drawOverlay(items, v.videoWidth, v.videoHeight);
       renderDetList(items);
-      $("stats").innerHTML = `${live.used}: ${(t1 - t0).toFixed(1)} ms per frame<br>${fps.toFixed(1)} FPS`;
+      $("stats").innerHTML = `${live.used}: ${(t1 - t0).toFixed(1)} ms per frame<br>${fps.toFixed(1)} FPS` + (liveOn ? `<br>${liveNote || `depth ${liveFps ? liveFps.toFixed(1) + " /s" : "starting…"}`}` : "");
     } catch (e) { setStatus(`Recognition error: ${e.message}`, true); }
     scanBusy = false;
   }
@@ -945,7 +951,7 @@ async function analyseCanvas(c) {
   $("segBtn").hidden = true; $("segHelp").hidden = true;
   drawOverlay(items, c.width, c.height);
   renderDetList.key = null; renderDetList(items);
-  segmentStill(); // automatic: finds every item, outlines it, identifies it
+  quickMeasure(); // detector boxes + depth only; SAM 2 / CLIP are opt-in via the button
 }
 $("photoIn").onchange = async e => {
   const file = e.target.files[0]; e.target.value = "";
@@ -1384,6 +1390,100 @@ window.getDepthMap = async canvas => {
   return { data: resizeF32(z, w, h, canvas.width, canvas.height), width: canvas.width, height: canvas.height };
 };
 
+// ---------------------------------------------------------------- LIVE DEPTH (real time, detector boxes only, no SAM 2 / CLIP)
+// Every iteration: grab a small frame (252 px short side) -> Depth Anything -> metres -> fit the table plane from pixels OUTSIDE the
+// detector boxes -> integrate height x footprint inside each box -> grams. Runs as fast as the phone allows (shown in the stats box).
+const DEPTH_LIVE_SHORT = 252, MIN_RAISED = 0.004;   // short side must be a multiple of 14; pixels < 4 mm above the table are not food
+let liveOn = true; try { liveOn = localStorage.getItem("cc-live-depth") !== "0"; } catch (e) {}
+let liveMeasures = [], liveFps = 0, liveBusy = false, liveNote = "", liveSmooth = {};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+$("liveDepthBtn").textContent = `Live depth: ${liveOn ? "on" : "off"}`;
+$("liveDepthBtn").onclick = () => {
+  liveOn = !liveOn; try { localStorage.setItem("cc-live-depth", liveOn ? "1" : "0"); } catch (e) {}
+  $("liveDepthBtn").textContent = `Live depth: ${liveOn ? "on" : "off"}`;
+  if (liveOn && camOn) depthLiveLoop(); else { liveMeasures = []; liveNote = ""; }
+};
+function frameTensor(src, W, H) {
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const x = c.getContext("2d", { willReadFrequently: true }); x.drawImage(src, 0, 0, W, H);
+  const px = x.getImageData(0, 0, W, H).data, n = W * H, a = new Float32Array(3 * n), mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) a[k * n + i] = (px[i * 4 + k] / 255 - mean[k]) / std[k];
+  return new TJS.Tensor("float32", a, [1, 3, H, W]);
+}
+function toMetres(raw, w, h, metric) {
+  const ring = [], bx = Math.max(2, Math.round(w * 0.12)), by = Math.max(2, Math.round(h * 0.12));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < bx || x >= w - bx || y < by || y >= h - by) { const v = raw[y * w + x]; if (isFinite(v) && v > 0) ring.push(v); }
+  const ref = medianOf(ring); if (!(ref > 0)) return null;
+  const H0 = camH(), z = new Float32Array(raw.length), floor = ref * 0.05;
+  for (let i = 0; i < z.length; i++) z[i] = Math.min(3, Math.max(0.05, metric ? raw[i] * H0 / ref : H0 * ref / Math.max(raw[i], floor)));
+  return z;
+}
+function attachMeasures(items) {
+  if (!liveOn || !liveMeasures.length) return;
+  items.forEach(it => {
+    const cx = it.x + it.w / 2, cy = it.y + it.h / 2; let best = null, bd = Infinity;
+    liveMeasures.forEach(m => { if (m.label !== it.label) return; const d = Math.hypot(m.cx - cx, m.cy - cy); if (d < bd) { bd = d; best = m; } });
+    if (best && bd < Math.max(it.w, it.h) * 0.6) { it.grams = best.grams; it.ml = best.ml; }
+  });
+}
+async function depthLiveLoop() {
+  if (liveBusy) return; liveBusy = true;
+  try {
+    const est = await loadDepthEstimator();
+    let fast = true, tPrev = 0;
+    while (camOn && !frozen && liveOn && !$("tab-scan").hidden) {
+      const v = $("video");
+      if (v.readyState < 2 || !v.videoWidth || !lastDets.length) { liveNote = lastDets.length ? "" : "depth: waiting for a detection"; await sleep(150); continue; }
+      const items = lastDets.slice(), vw = v.videoWidth, vh = v.videoHeight, ar = vw / vh;
+      const W = ar >= 1 ? Math.round(DEPTH_LIVE_SHORT * ar / 14) * 14 : DEPTH_LIVE_SHORT, H = ar >= 1 ? DEPTH_LIVE_SHORT : Math.round(DEPTH_LIVE_SHORT / ar / 14) * 14;
+      let raw = null, w = 0, h = 0;
+      if (fast) {
+        try {
+          const t = (await est.pipe.model({ pixel_values: frameTensor(v, W, H) })).predicted_depth;
+          const dm = t.dims.slice(-2); h = dm[0]; w = dm[1]; raw = Float32Array.from(t.data); if (t.dispose) t.dispose();
+        } catch (e) { fast = false; dbg("live depth: small-size path failed (" + (e && e.message) + "), using the default 518 px size"); }
+      }
+      if (!raw) {
+        const c = document.createElement("canvas"); c.width = W; c.height = H; c.getContext("2d").drawImage(v, 0, 0, W, H);
+        const t = (await est.pipe(await TJS.RawImage.fromCanvas(c))).predicted_depth, dm = t.dims.slice(-2); h = dm[0]; w = dm[1]; raw = Float32Array.from(t.data);
+      }
+      const z = toMetres(raw, w, h, est.metric); if (!z) { await sleep(100); continue; }
+      const fpx = (w / 2) / Math.tan(CAM_HFOV * Math.PI / 360), sx = w / vw, sy = h / vh;
+      const boxes = items.map(it => [Math.max(0, Math.floor(it.x * sx)), Math.max(0, Math.floor(it.y * sy)), Math.min(w, Math.ceil((it.x + it.w) * sx)), Math.min(h, Math.ceil((it.y + it.h) * sy))]);
+      const inBox = new Uint8Array(w * h);
+      boxes.forEach(([x0, y0, x1, y1]) => { const px = Math.round((x1 - x0) * 0.05), py = Math.round((y1 - y0) * 0.05);
+        for (let y = Math.max(0, y0 - py); y < Math.min(h, y1 + py); y++) inBox.fill(1, y * w + Math.max(0, x0 - px), y * w + Math.min(w, x1 + px)); });
+      const plane = fitPlane(z, w, h, i => !inBox[i]);
+      if (!plane) { liveMeasures = []; liveNote = "depth: show some bare table around the food"; await sleep(100); continue; }
+      const rank = {}, out = [];
+      items.forEach((it, k) => {
+        const f = labelFood(it.label); if (!f) return;
+        const [x0, y0, x1, y1] = boxes[k]; let vol = 0, hs = 0, n = 0;
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+          const zz = z[y * w + x], hg = Math.min(0.12, planeZ(plane, x, y, w, h) - zz);
+          if (hg > MIN_RAISED) { vol += hg * (zz / fpx) ** 2; hs += hg; n++; }
+        }
+        const ml = vol * 1e6, raw_g = ml * densityFor(f.name), kk = kMap()[f.name] || 1;
+        const key = it.label + "#" + (rank[it.label] = (rank[it.label] || 0) + 1), prev = liveSmooth[key];
+        const g = prev ? 0.6 * prev + 0.4 * raw_g * kk : raw_g * kk; liveSmooth[key] = g;
+        out.push({ label: it.label, cx: it.x + it.w / 2, cy: it.y + it.h / 2, grams: g, ml, meanH: n ? hs / n : 0 });
+      });
+      liveMeasures = out; liveNote = "";
+      const now = performance.now(); if (tPrev) { const inst = 1000 / (now - tPrev); liveFps = liveFps ? 0.8 * liveFps + 0.2 * inst : inst; } tPrev = now;
+    }
+  } catch (e) { dbg("live depth stopped: " + (e && e.message)); liveNote = "depth stopped: " + (e && e.message); }
+  finally { liveBusy = false; }
+}
+// Capture / photo: no heavy models. Detector boxes + Depth Anything at full size. SAM 2 + CLIP stay optional behind the button.
+async function quickMeasure() {
+  $("segBtn").textContent = "Precise outlines (downloads ~250 MB)";
+  try {
+    const ok = await detectorDepthFallback();
+    if (!ok && !stillItems.length) setStatus("The recogniser found no food in this photo. Try again closer, or use Add food.", true);
+    else if (!ok) setStatus("Depth could not run for this photo. Open the Debug log below to see why.", true);
+  } catch (e) { dbg("quick measure failed: " + (e && e.message)); setStatus(`Measuring failed: ${e.message}`, true); }
+  $("segBtn").hidden = false;
+}
 // Heat map of food height above the fitted table plane (blue = table level, red = 4 cm or more). Tap the button again to go back.
 let depthView = false;
 function drawDepthView() {

@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Calorie Counter">
-<meta name="theme-color" content="#F2F4EE">
+<meta name="theme-color" content="#F0F7FF">
 <meta name="description" content="Calorie counter with Indian foods, portion sizes and on-device food recognition.">
 <meta property="og:title" content="Calorie Counter">
 <meta property="og:description" content="Log meals by portion, see calories and macros. Works in your phone browser, no install.">
@@ -16,19 +16,19 @@
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&display=swap" rel="stylesheet">
 <style>
   :root {
-    /* rice-white paper, banana-leaf green, turmeric, chilli, indigo */
-    --bg: #F2F4EE; --surface: #FFFFFF; --ink: #16241D; --muted: #5E6C63; --line: #DCE2D8;
-    --leaf: #1F5A43; --on-leaf: #FFFFFF; --leaf-soft: #DDEBE2; --track: #DDE3D8;
-    --turmeric: #E9A91B; --chilli: #C4412B; --indigo: #4C5FA8; --warn: #B0361F; --sky: #2A6FDB;
+    /* cool paper, blue primary, turmeric, chilli, violet */
+    --bg: #F0F7FF; --surface: #FFFFFF; --ink: #14202E; --muted: #5A6879; --line: #DAE1EB;
+    --leaf: #0090FF; --leaf-ink: #006FC2; --on-leaf: #FFFFFF; --leaf-soft: #D8EDFF; --track: #DAE7F4;
+    --turmeric: #E9A91B; --chilli: #C4412B; --indigo: #B04FC4; --warn: #B0361F; --sky: #B86E00;
     --font: "Bricolage Grotesque", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
     --r: 16px;
     box-sizing: border-box;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #0F1611; --surface: #18221B; --ink: #E8EFE9; --muted: #98A89D; --line: #2A372E;
-      --leaf: #62C795; --on-leaf: #0B1A11; --leaf-soft: #1F3328; --track: #263329;
-      --turmeric: #F0B83A; --chilli: #FF8265; --indigo: #8FA8FF; --warn: #FF8A6B; --sky: #7DAAFF;
+      --bg: #0C141C; --surface: #15202B; --ink: #E8EEF7; --muted: #98A7BB; --line: #263349;
+      --leaf: #38AEFF; --leaf-ink: #5CBBFF; --on-leaf: #04182A; --leaf-soft: #0F3556; --track: #1D3046;
+      --turmeric: #F0B83A; --chilli: #FF8265; --indigo: #B598F0; --warn: #FF8A6B; --sky: #F0B83A;
     }
   }
   *, *::before, *::after { box-sizing: inherit; }
@@ -55,7 +55,7 @@
                     font-size: 12px; font-weight: 600; color: var(--muted); padding: 0; }
   nav.tabs .ic { display: grid; place-items: center; width: 56px; height: 30px; border-radius: 999px; transition: background .2s; }
   nav.tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  nav.tabs button[aria-selected="true"] { color: var(--leaf); font-weight: 700; }
+  nav.tabs button[aria-selected="true"] { color: var(--leaf-ink); font-weight: 700; }
   nav.tabs button[aria-selected="true"] .ic { background: var(--leaf-soft); }
 
   /* ---------- buttons ---------- */
@@ -124,13 +124,13 @@
   .searchbox svg { position: absolute; left: 31px; top: 50%; transform: translateY(-45%); width: 20px; height: 20px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
   .searchbox input { width: 100%; padding: 14px 16px 14px 46px; border: 1.5px solid var(--line); font-size: 16.5px; border-radius: 999px; background: var(--surface); -webkit-appearance: none; appearance: none; }
   .searchbox input:focus { border-color: var(--leaf); outline: none; box-shadow: 0 0 0 3px var(--leaf-soft); }
-  .cat { padding: 22px 16px 6px; font-weight: 700; font-size: 15px; color: var(--leaf); }
+  .cat { padding: 22px 16px 6px; font-weight: 700; font-size: 15px; color: var(--leaf-ink); }
   .food { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; text-align: left; padding: 12px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; }
   .food:active { background: var(--leaf-soft); }
   .food .n { font-weight: 650; }
   .food .u { font-size: 13.5px; color: var(--muted); }
   .food .kc { font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: auto; font-size: 15px; }
-  .food::after { content: "+"; flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--leaf-soft); color: var(--leaf); display: grid; place-items: center; font-size: 20px; font-weight: 600; line-height: 1; padding-bottom: 2px; }
+  .food::after { content: "+"; flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--leaf-soft); color: var(--leaf-ink); display: grid; place-items: center; font-size: 20px; font-weight: 600; line-height: 1; padding-bottom: 2px; }
 
   /* ---------- forms ---------- */
   .field { padding: 8px 0; }
@@ -147,7 +147,7 @@
   .group > h3 { margin-top: 18px; }
 
   /* ---------- portion sheet ---------- */
-  .sheet-bg { position: fixed; inset: 0; background: rgba(8,18,12,.5); display: flex; align-items: flex-end; justify-content: center; z-index: 20; }
+  .sheet-bg { position: fixed; inset: 0; background: rgba(8,14,26,.5); display: flex; align-items: flex-end; justify-content: center; z-index: 20; }
   .sheet { background: var(--bg); width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto; padding: 10px 18px calc(18px + env(safe-area-inset-bottom, 0px)); border-radius: 26px 26px 0 0; animation: rise .22s ease-out; }
   .sheet::before { content: ""; display: block; width: 42px; height: 5px; border-radius: 3px; background: var(--line); margin: 0 auto 14px; }
   .sheet h3 { margin: 0 0 2px; font-size: 25px; letter-spacing: -.02em; }

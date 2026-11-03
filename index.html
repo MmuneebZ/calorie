@@ -1422,7 +1422,7 @@ $("detList").addEventListener("click", e => {
 const PARTS_FOR = /pizza/i;                // dishes that get topping-level analysis; widen the regex to add more
 const PART_PX = 512, PART_GRID = 12, MAX_PARTS = 40, TOP_MIN = 0.03, DOUBLE_CHEESE_MM = 16;
 let CAM_HFOV = (() => { const v = parseFloat(store.get("cc-fov", 65)); return v >= 40 && v <= 110 ? v : 65; })();                       // horizontal field of view of the phone camera in degrees
-const DENSITY = [[/pizza/i, 0.55], [/rice|biryani|pulao/i, 0.8], [/dal|curry|soup|kheer|sabzi|masala/i, 1.0], [/roti|chapati|naan|paratha|bread/i, 0.5], [/./, 0.9]];
+const DENSITY = [[/bhatura|puri|poori|kachori|samosa|pakoda|pakora|papad/i, 0.35], [/pizza/i, 0.55], [/rice|biryani|pulao/i, 0.8], [/dal|curry|soup|kheer|sabzi|masala/i, 1.0], [/roti|chapati|naan|paratha|bread/i, 0.5], [/./, 0.9]];
 const TOP_LIST = [
   { id: "capsicum", prompt: "a green bell pepper (capsicum) piece on a pizza", kind: "veg", kcal: 20 },
   { id: "onion", prompt: "an onion slice on a pizza", kind: "veg", kcal: 40 },
@@ -1615,20 +1615,36 @@ async function depthLiveLoop() {
       const inBox = new Uint8Array(w * h);
       boxes.forEach(([x0, y0, x1, y1]) => { const px = Math.round((x1 - x0) * 0.05), py = Math.round((y1 - y0) * 0.05);
         for (let y = Math.max(0, y0 - py); y < Math.min(h, y1 + py); y++) inBox.fill(1, y * w + Math.max(0, x0 - px), y * w + Math.min(w, x1 + px)); });
+      const bgFrac = 1 - inBox.reduce((a, v) => a + v, 0) / inBox.length;
+      if (bgFrac < 0.15) { liveMeasures = []; liveNote = "depth: move back, show more bare table around the food"; await sleep(100); continue; }
       const plane = fitPlane(z, w, h, i => !inBox[i]);
       if (!plane) { liveMeasures = []; liveNote = "depth: show some bare table around the food"; await sleep(100); continue; }
       { const sk = camH() / plane.c; if (sk > 0.3 && sk < 3) { for (let i = 0; i < z.length; i++) z[i] *= sk; plane.a *= sk; plane.b *= sk; plane.c *= sk; } } // table plane = the calibrated camera height
       const rank = {}, out = [];
+      // each pixel belongs to ONE item (smallest box first) and only the inscribed ellipse counts, so overlapping boxes and box corners (plate) are not double counted
+      const owner = new Int16Array(w * h).fill(-1);
+      boxes.map((bb, k) => [k, (bb[2] - bb[0]) * (bb[3] - bb[1])]).sort((p, q) => p[1] - q[1]).forEach(([k]) => {
+        const [x0, y0, x1, y1] = boxes[k], cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = Math.max(1, (x1 - x0) / 2), ry = Math.max(1, (y1 - y0) / 2);
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry; if (dx * dx + dy * dy <= 1 && owner[y * w + x] < 0) owner[y * w + x] = k; }
+      });
       items.forEach((it, k) => {
         const f = labelFood(it.label); if (!f) return;
-        const [x0, y0, x1, y1] = boxes[k]; let vol = 0, hs = 0, n = 0;
+        const [x0, y0, x1, y1] = boxes[k], cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = Math.max(1, (x1 - x0) / 2), ry = Math.max(1, (y1 - y0) / 2);
+        const hOf = (x, y) => planeZ(plane, x, y, w, h) - z[y * w + x];
+        // local base: the box corners (outside the ellipse) are plate/table, so how high they sit above the fitted plane is the plate rise
+        const corner = [];
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry; if (dx * dx + dy * dy > 1) corner.push(hOf(x, y)); }
+        corner.sort((p, q) => p - q);
+        const base = corner.length > 20 ? Math.min(0.06, Math.max(0, corner[Math.floor(corner.length * 0.25)])) : 0;
+        let vol = 0, hs = 0, n = 0;
         for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
-          const zz = z[y * w + x], hg = Math.min(0.12, planeZ(plane, x, y, w, h) - zz);
+          if (owner[y * w + x] !== k) continue;
+          const zz = z[y * w + x], hg = Math.min(0.12, hOf(x, y) - base);
           if (hg > MIN_RAISED) { vol += hg * (zz / fpx) ** 2; hs += hg; n++; }
         }
         const key = it.label + "#" + (rank[it.label] = (rank[it.label] || 0) + 1);
         const hist = (liveSmooth[key] = (liveSmooth[key] || []).concat(vol * 1e6).slice(-9));   // median of the last 9 readings: steady numbers
-        const mlRaw = medianOf(hist), ml = mlRaw * volK(), g = ml * densityFor(f.name) * (kMap()[f.name] || 1);
+        const mlRaw = medianOf(hist), ml = mlRaw * volK(), g = capG(f, ml * densityFor(f.name) * (kMap()[f.name] || 1));
         out.push({ label: it.label, cx: it.x + it.w / 2, cy: it.y + it.h / 2, grams: g, ml, mlRaw, meanH: n ? hs / n : 0 });
       });
       liveMeasures = out; liveNote = "";
@@ -1757,6 +1773,7 @@ async function prepDepth() {
   let mn = Infinity, mx = -Infinity; for (let i = 0; i < d.length; i += 97) { if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
   dbg(`DEPTH ok: z range ${(mn * 100).toFixed(0)}-${(mx * 100).toFixed(0)} cm, table plane at centre ${(plane.c * 100).toFixed(1)} cm, tilt x ${(plane.a * 100).toFixed(1)} y ${(plane.b * 100).toFixed(1)} cm`);
 }
+const capG = (food, g) => { const u = food && food.units && food.units[0]; return u ? Math.min(g, u.g * 3) : g; }; // never report more than 3 typical portions
 const densityFor = name => DENSITY.find(([re]) => re.test(name))[1];
 const kMap = () => store.get("cc-depth-k", {});
 function setGrams(seg) {
@@ -1765,7 +1782,7 @@ function setGrams(seg) {
   const v = volumeML(d, W, H, plane, fpx, cb => { for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) if (m[y * W + x]) cb(x, y, 4); });
   seg.meanH = v.meanH; seg.ml = v.ml * volK(); seg.gramsRaw = seg.ml * densityFor(seg.food.name);
   dbg(`VOLUME ${seg.food.name}: mean height ${(v.meanH * 1000).toFixed(1)} mm, ${v.ml.toFixed(0)} mL, ${seg.gramsRaw.toFixed(0)} g raw`);
-  seg.grams = seg.gramsRaw * (kMap()[seg.food.name] || 1);
+  seg.grams = capG(seg.food, seg.gramsRaw * (kMap()[seg.food.name] || 1));
   if (seg.comp) Object.values(seg.comp).forEach(g => {
     const sc = seg.partScale, bx = seg.box[0], by = seg.box[1];
     let ml = 0;

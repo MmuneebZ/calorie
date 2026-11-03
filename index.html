@@ -201,15 +201,14 @@
       <p class="help" id="segHelp" hidden>Each colour is one item found automatically. Tap an item to remove it, or tap an uncoloured food to add it. Use "Not right?" under a result to switch to the next best guess.</p>
       <h3>Recognised</h3>
       <div id="detList"><p class="empty">Nothing recognised yet.</p></div>
-      <p class="help">The built-in EfficientDet model knows banana, apple, orange, broccoli, carrot, sandwich, hot dog, pizza, donut and cake. For Indian dishes, load the custom model below. Anything the scanner misses can still be found with Add food (130+ foods with standard portions).</p>
-      <div class="field"><span>Recognition model</span>
-        <select id="modelSel"></select>
-      </div>
-      <p class="help" id="modelHelp"></p>
-      <label class="btn block" style="text-align:center">Load custom model (.tflite)<input type="file" id="modelIn" hidden></label>
-      <div class="field"><span>Processor</span>
-        <div class="seg" id="delSeg"><button data-del="GPU">GPU</button><button data-del="CPU">CPU</button></div>
-      </div>
+      <p class="help" id="modelHelp">Recognition is automatic: your Indian food model and EfficientDet (banana, apple, orange, broccoli, carrot, sandwich, hot dog, pizza, donut, cake) both run on every frame and the best match wins. Anything the scanner misses can still be found with Add food.</p>
+      <details class="pad" style="padding:6px 0"><summary class="help">Advanced: models and processor</summary>
+        <div class="field"><span>Recognition model</span><select id="modelSel"></select></div>
+        <label class="btn block" style="text-align:center">Load a different Indian food model (.tflite)<input type="file" id="modelIn" hidden></label>
+        <div class="field"><span>Processor</span>
+          <div class="seg" id="delSeg"><button data-del="GPU">GPU</button><button data-del="CPU">CPU</button></div>
+        </div>
+      </details>
       <details class="pad" style="padding:6px 0"><summary class="help">Advanced: depth scale</summary>
         <div class="field"><span>Assumed camera height above the table (cm)</span><input id="camH" type="number" inputmode="decimal" min="15" max="150"></div>
         <p class="help">Only used to set the real-world scale of the depth map. Leave it at 40 and fix any remaining error with "Weigh" once per food.</p></details>
@@ -485,7 +484,8 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { toast("Could not save: storage is full or blocked"); } },
 };
-const S = Object.assign({ goal: 2000, sex: "m", aim: "0", model: "edl0-f16", delegate: "GPU" }, store.get("cc-settings", {}));
+const S = Object.assign({ goal: 2000, sex: "m", aim: "0", model: "auto", delegate: "GPU" }, store.get("cc-settings", {}));
+if (!S.autoMig) { S.model = "auto"; S.autoMig = true; try { localStorage.setItem("cc-settings", JSON.stringify(S)); } catch (e) {} }
 const saveSettings = () => store.set("cc-settings", S);
 let log = store.get("cc-log", []);          // entries
 let customFoods = store.get("cc-custom", []);
@@ -744,7 +744,8 @@ const MODELS = [
 // Custom Indian-food model (trained with train_indian_food_detector.ipynb). Kept in memory and in IndexedDB.
 const CUSTOM = { id: "custom", name: "Indian food (custom model)", url: null };
 let customBytes = null;
-const allModels = () => (customBytes ? [CUSTOM].concat(MODELS) : MODELS);
+const AUTO = { id: "auto", name: "Auto (Indian food + EfficientDet)", url: null };
+const allModels = () => [AUTO].concat(customBytes ? [CUSTOM] : [], MODELS);
 const findModel = id => allModels().find(x => x.id === id) || allModels()[0];
 const isTflite = b => b && b.length > 100000 && String.fromCharCode(b[4], b[5], b[6], b[7]) === "TFL3";
 const idb = {
@@ -819,15 +820,51 @@ async function createDetector(m, delegate, runningMode) {
     baseOptions: { modelAssetBuffer: bytes, delegate }, runningMode, scoreThreshold: m.id === "custom" ? 0.3 : 0.35, maxResults: 15,
   });
 }
+// Auto mode: EfficientDet-Lite0 (everyday foods) and your custom Indian food model run on the same frame.
+// Boxes that overlap are merged: the more confident one wins, but a generic Indian class ("curry dish", "fruits", ...) loses to a specific match.
+const GENERIC_CUSTOM = new Set(["curry dish", "snack item", "sweet item", "rice dish", "south indian breakfast", "dry vegetable", "fish dish", "fruits", "bread or roti naan"]);
+const norm = l => String((l || "")).toLowerCase().replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+function mergeDetections(all) {
+  const eff = d => { const c = d.categories[0]; return (c.score || 0) * (d._src === "custom" && GENERIC_CUSTOM.has(norm(c.categoryName)) ? 0.7 : 1); };
+  const ok = d => d.categories && d.categories[0] && d.boundingBox && (d._src === "coco" ? !!DETECT_MAP[norm(d.categories[0].categoryName)] : norm(d.categories[0].categoryName) !== "background" && !!norm(d.categories[0].categoryName));
+  const sorted = all.filter(ok).sort((a, b) => eff(b) - eff(a)), kept = [];
+  for (const d of sorted) {
+    const a = d.boundingBox;
+    const clash = kept.some(k => {
+      const b = k.boundingBox, iw = Math.min(a.originX + a.width, b.originX + b.width) - Math.max(a.originX, b.originX), ih = Math.min(a.originY + a.height, b.originY + b.height) - Math.max(a.originY, b.originY);
+      if (iw <= 0 || ih <= 0) return false;
+      const inter = iw * ih, small = Math.min(a.width * a.height, b.width * b.height), union = a.width * a.height + b.width * b.height - inter;
+      return inter / union > 0.4 || inter / small > 0.7;
+    });
+    if (!clash) kept.push(d);
+  }
+  return kept;
+}
+function makeAutoDetector(parts) {
+  const run = fn => {
+    const all = [];
+    parts.forEach(pt => { try { fn(pt.det).detections.forEach(d => all.push({ categories: d.categories, boundingBox: d.boundingBox, _src: pt.src })); } catch (e) { dbg(`${pt.src} detector error: ${e && e.message}`); } });
+    return { detections: mergeDetections(all) };
+  };
+  return { detectForVideo: (v, t) => run(d => d.detectForVideo(v, t)), detect: c => run(d => d.detect(c)), close: () => parts.forEach(pt => { try { pt.det.close(); } catch (e) {} }) };
+}
+// One entry point for every place that needs a detector (live video, captured photo, crops, speed test).
+async function createActiveDetector(delegate, runningMode) {
+  if (S.model !== "auto") return createDetector(findModel(S.model), delegate, runningMode);
+  const parts = [{ src: "coco", det: await createDetector(MODELS[0], delegate, runningMode) }];
+  if (customBytes) { try { parts.push({ src: "custom", det: await createDetector(CUSTOM, delegate, runningMode) }); } catch (e) { dbg("Indian food model could not start: " + (e && e.message)); } }
+  dbg(`Auto detector: ${parts.map(x => x.src).join(" + ")}`);
+  return makeAutoDetector(parts);
+}
 let loadingLive = null;
 async function loadLive() {
   const m = findModel(S.model);
   setStatus(`Loading the recogniser (${m.name})…`);
   if (live) { try { live.det.close(); } catch (e) {} live = null; }
   let det = null, used = S.delegate;
-  try { det = await createDetector(m, S.delegate, "VIDEO"); }
+  try { det = await createActiveDetector(S.delegate, "VIDEO"); }
   catch (e) {
-    if (S.delegate === "GPU") { try { det = await createDetector(m, "CPU", "VIDEO"); used = "CPU"; } catch (e2) { e = e2; } }
+    if (S.delegate === "GPU") { try { det = await createActiveDetector("CPU", "VIDEO"); used = "CPU"; } catch (e2) { e = e2; } }
     if (!det) { setStatus(`The recogniser could not load (${e.message}). Check your internet connection and reopen this tab. Add food still works.`, true); return; }
   }
   live = { det, used, model: m };
@@ -860,13 +897,13 @@ function stopCamera() {
   if (!frozen) $("placeholder").hidden = false;
 }
 const usingCustom = () => S.model === "custom" && !!customBytes;
-const labelFood = label => (usingCustom() ? resolveFood(label) : findFood(DETECT_MAP[label]));
+const labelFood = label => resolveFood(label);
 function toItems(dets) {
   const custom = usingCustom();
   return dets.map(d => {
     const c = d.categories[0], b = d.boundingBox;
     return { label: (c.categoryName || "").toLowerCase().replace(/[_\-]+/g, " ").trim(), score: c.score, x: b.originX, y: b.originY, w: b.width, h: b.height };
-  }).filter(d => custom ? d.label && d.label !== "background" : DETECT_MAP[d.label]);
+  }).filter(d => S.model === "auto" ? !!d.label : (custom ? d.label && d.label !== "background" : DETECT_MAP[d.label]));
 }
 function drawOverlay(items, srcW, srcH) {
   const cv = $("overlay"), vp = $("viewport"), dpr = window.devicePixelRatio || 1;
@@ -939,8 +976,7 @@ function scanLoop() {
 $("startCam").onclick = startCamera;
 // Run the box detector on a canvas, freeze it on screen, remember it for segmentation.
 async function analyseCanvas(c) {
-  const m = findModel(S.model);
-  const det = await createDetector(m, live ? live.used : "CPU", "IMAGE");
+  const det = await createActiveDetector(live ? live.used : "CPU", "IMAGE");
   const out = det.detect(c);
   det.close();
   frozen = true; stopCamera();
@@ -1162,7 +1198,7 @@ async function identify(seg, det) {
 }
 async function identifyAll(list) {
   let det = null;
-  try { det = await createDetector(findModel(S.model), live ? live.used : "CPU", "IMAGE"); } catch (e) { dbg("detector unavailable for crops: " + e.message); }
+  try { det = await createActiveDetector(live ? live.used : "CPU", "IMAGE"); } catch (e) { dbg("detector unavailable for crops: " + e.message); }
   try { for (let i = 0; i < list.length; i++) { setStatus(`Identifying item ${i + 1} of ${list.length}…`); await identify(list[i], det); dbg(`item ${i + 1}: ${list[i].dbg}`); } }
   finally { if (det) det.close(); }
 }
@@ -1710,7 +1746,7 @@ $("speedTest").onclick = async () => {
   frozen = true; setStatus("Running speed test (40 runs)…");
   let det = null;
   try {
-    det = await createDetector(live.model, live.used, "IMAGE");
+    det = await createActiveDetector(live.used, "IMAGE");
     for (let i = 0; i < 5; i++) det.detect(c);
     const t = [];
     for (let i = 0; i < 40; i++) { const a = performance.now(); det.detect(c); t.push(performance.now() - a); }
@@ -1722,15 +1758,16 @@ $("speedTest").onclick = async () => {
 function refreshModelSel() {
   $("modelSel").innerHTML = allModels().map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join("");
   $("modelSel").value = allModels().some(m => m.id === S.model) ? S.model : allModels()[0].id;
-  $("modelHelp").textContent = customBytes
-    ? "Custom Indian food model loaded. It only knows the foods it was trained on; switch to EfficientDet to recognise fruit, pizza and cake."
-    : "No custom Indian food model loaded yet. Train one with the notebook, then load the .tflite file here.";
+  $("modelHelp").textContent = S.model === "auto"
+    ? (customBytes ? "Recognition is automatic: your Indian food model and EfficientDet both run on every frame and the best match wins. Anything the scanner misses can still be found with Add food."
+                   : "Recognition is automatic. Only EfficientDet is active so far (banana, apple, orange, broccoli, carrot, sandwich, hot dog, pizza, donut, cake); the Indian food model has not loaded yet. Anything missed can be found with Add food.")
+    : "A single model is selected under Advanced. Choose Auto to use both together.";
 }
 $("modelSel").onchange = e => { S.model = e.target.value; saveSettings(); renderDetList.key = null; ensureLive(); };
 async function setCustomModel(bytes, persist) {
   customBytes = bytes; resolveCache.clear();
   if (persist) await idb.put("custom", bytes);
-  S.model = "custom"; saveSettings(); refreshModelSel(); renderDetList.key = null;
+  S.model = "auto"; saveSettings(); refreshModelSel(); renderDetList.key = null;
   if (!$("tab-scan").hidden || live) ensureLive();
 }
 $("modelIn").onchange = async e => {
@@ -1751,10 +1788,10 @@ refreshModelSel();
   if (!bytes && location.protocol !== "file:") {
     try {
       const r = await fetch("indian_food.tflite", { cache: "no-cache" });
-      if (r.ok) { const b = new Uint8Array(await r.arrayBuffer()); if (isTflite(b)) { bytes = b; await idb.put("custom", b); if (!S.customSeen) { S.customSeen = true; S.model = "custom"; saveSettings(); } } }
+      if (r.ok) { const b = new Uint8Array(await r.arrayBuffer()); if (isTflite(b)) { bytes = b; await idb.put("custom", b); if (!S.customSeen) { S.customSeen = true; S.model = "auto"; saveSettings(); } } }
     } catch (e) {}
   }
-  if (bytes) { customBytes = bytes; refreshModelSel(); if (live && S.model === "custom") ensureLive(); }
+  if (bytes) { customBytes = bytes; refreshModelSel(); if (live && (S.model === "custom" || S.model === "auto")) ensureLive(); }
 })();
 function markDel() { document.querySelectorAll("#delSeg button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.del === S.delegate))); }
 document.querySelectorAll("#delSeg button").forEach(b => (b.onclick = () => { S.delegate = b.dataset.del; saveSettings(); markDel(); ensureLive(); }));

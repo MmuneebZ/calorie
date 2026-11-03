@@ -455,6 +455,16 @@ const FOOD_DATA = [
   ["Orange juice", 45, 0.7, 10.4, 0.2, "1 glass=250", "Drinks", "juice"],
   ["Cola / soft drink", 42, 0, 10.6, 0, "1 can=330;1 glass=250", "Drinks", "coke pepsi soda"],
   ["Beer", 43, 0.5, 3.6, 0, "1 can=330;1 bottle=650", "Drinks", ""],
+  // ---- added for the custom model's classes (typical values per 100 g, approximate; replace with your own if you have better data)
+  ["Ghevar", 450, 5, 55, 23, "1 piece=60", "Sweets", "ghewar"],
+  ["Rasmalai", 200, 6, 26, 8, "1 piece=70", "Sweets", "ras malai"],
+  ["Kulfi", 220, 5.5, 24, 11, "1 stick=80", "Sweets", "malai kulfi"],
+  ["Seekh kebab", 230, 17, 5, 15.5, "1 piece=50;1 plate (4)=200", "Snacks", "kebab kabab"],
+  ["Bhatura", 350, 7, 47, 14, "1 bhatura=80", "Rice & breads", "bhature"],
+  ["Dum aloo", 135, 2.2, 14, 7.5, "1 katori=150", "Curries & dal", "dumaloo kashmiri dum aloo"],
+  ["Shahi paneer", 230, 9, 8, 18, "1 katori=150", "Curries & dal", "shahipaneer"],
+  ["Green chutney (mint-coriander)", 40, 2, 5, 1.5, "1 tbsp=15", "Curries & dal", "pudina chutney"],
+  ["Tomato soup", 45, 1, 7, 1.5, "1 bowl=250", "Snacks", "soup"],
 ];
 
 // scanner label (COCO) -> food in the database
@@ -755,6 +765,12 @@ const SYN = {
   "laddu": "Besan laddu", "ladoo": "Besan laddu", "pakora": "Pakora / bhaji", "bhaji": "Pakora / bhaji", "pav bhaji": "Pav bhaji (bhaji only)",
   "chicken tandoori": "Tandoori chicken", "tandoori": "Tandoori chicken", "butter chicken masala": "Butter chicken",
   "noodles": "Hakka noodles", "momos": "Veg momos (steamed)", "momo": "Veg momos (steamed)", "fries": "French fries", "pasta": "Pasta, cooked plain",
+  // the custom model's class names (written without spaces)
+  "aloogobi": "Aloo gobi", "aloomasala": "Potato curry / aloo sabzi", "bhature": "Bhatura", "bhindimasala": "Bhindi fry",
+  "coconutchutney": "Coconut chutney", "greenchutney": "Green chutney (mint-coriander)", "dumaloo": "Dum aloo",
+  "fishcurry": "Fish curry", "muttoncurry": "Mutton curry", "gulabjamun": "Gulab jamun", "onionpakoda": "Pakora / bhaji",
+  "palakpaneer": "Palak paneer", "shahipaneer": "Shahi paneer", "rajmacurry": "Rajma curry", "whiterice": "White rice, cooked",
+  "ghevar": "Ghevar", "kebab": "Seekh kebab", "kulfi": "Kulfi", "rasmalai": "Rasmalai",
 };
 const resolveCache = new Map();
 function resolveFood(label) {
